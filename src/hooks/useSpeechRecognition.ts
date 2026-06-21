@@ -68,15 +68,23 @@ export interface UseSpeechRecognitionResult {
  * - Tries multiple language tags in order; Safari rejects `yue-*`, so we
  *   retry with `zh-HK` on a `language-not-supported` error.
  * - Optimistic listening state for Safari, whose `onstart` is unreliable.
+ * - When `continuous` is true: accumulates final text across speech segments,
+ *   auto-restarts on silence (keep-alive), and appends alternatives. Use for
+ *   timed/whole-table recite modes.
  *
  * @param langCandidates ordered BCP-47 tags to try (default: Cantonese set).
+ * @param continuous keep recognition alive across silence gaps (default false).
  */
 export function useSpeechRecognition(
-  langCandidates: string[] = cantoneseLangCandidates()
+  langCandidates: string[] = cantoneseLangCandidates(),
+  continuous = false
 ): UseSpeechRecognitionResult {
   const recognitionRef = useRef<ISpeechRecognition | null>(null)
   const langIndexRef = useRef(0)
   const retryingRef = useRef(false)
+  const keepAliveRef = useRef(false)
+  const accumulatedRef = useRef('')
+  const accumulatedAltsRef = useRef<RecognitionAlternative[]>([])
   const [isListening, setIsListening] = useState(false)
   const [interimText, setInterimText] = useState('')
   const [finalText, setFinalText] = useState('')
@@ -97,7 +105,7 @@ export function useSpeechRecognition(
 
     const recognition = new SpeechRecognitionClass()
     recognition.lang = candidatesRef.current[langIndexRef.current] ?? 'zh-HK'
-    recognition.continuous = false
+    recognition.continuous = continuous
     recognition.interimResults = true
     // Safari often returns only 1 alternative regardless; ask for more anyway.
     recognition.maxAlternatives = 5
@@ -132,8 +140,18 @@ export function useSpeechRecognition(
 
       if (interim) setInterimText(interim)
       if (final) {
-        setFinalText(final)
-        setAlternatives(alts)
+        if (continuous) {
+          // Accumulate across keep-alive restarts — space-separate segments
+          const separator = accumulatedRef.current ? ' ' : ''
+          accumulatedRef.current += separator + final
+          setFinalText(accumulatedRef.current)
+          // Merge new alternatives with accumulated ones
+          accumulatedAltsRef.current = [...accumulatedAltsRef.current, ...alts]
+          setAlternatives(accumulatedAltsRef.current)
+        } else {
+          setFinalText(final)
+          setAlternatives(alts)
+        }
       }
     }
 
@@ -169,6 +187,15 @@ export function useSpeechRecognition(
           /* fall through to stop */
         }
       }
+      // Continuous keep-alive: restart on silence gap without clearing accumulator
+      if (keepAliveRef.current) {
+        try {
+          recognition.start()
+          return
+        } catch {
+          /* fall through to stop */
+        }
+      }
       setIsListening(false)
     }
 
@@ -191,6 +218,9 @@ export function useSpeechRecognition(
     setFinalText('')
     setAlternatives([])
     setError(null)
+    accumulatedRef.current = ''
+    accumulatedAltsRef.current = []
+    if (continuous) keepAliveRef.current = true
     // Safari's onstart is unreliable — flip listening on optimistically so the
     // UI (and mic visual) react immediately; onend/onerror will clear it.
     if (isSafari()) setIsListening(true)
@@ -199,20 +229,24 @@ export function useSpeechRecognition(
     } catch {
       // Already started — ignore (Safari throws InvalidStateError)
     }
-  }, [])
+  }, [continuous])
 
   const stopListening = useCallback(() => {
+    // Clear keep-alive flag first so onend won't restart
+    if (continuous) keepAliveRef.current = false
     try {
       recognitionRef.current?.stop()
     } catch {
       /* not started */
     }
-  }, [])
+  }, [continuous])
 
   const resetTranscript = useCallback(() => {
     setInterimText('')
     setFinalText('')
     setAlternatives([])
+    accumulatedRef.current = ''
+    accumulatedAltsRef.current = []
   }, [])
 
   return {

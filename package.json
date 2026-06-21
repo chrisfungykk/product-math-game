@@ -1,6 +1,6 @@
 {
   "name": "product-math-game",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Interactive WebGL Cantonese multiplication learning game",
   "type": "module",
   "scripts": {
