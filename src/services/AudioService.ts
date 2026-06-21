@@ -36,9 +36,10 @@ class AudioServiceImpl {
     if (!this.audioCtx) {
       this.audioCtx = new AudioContext()
     }
+    // iOS Safari suspends AudioContext until user gesture — resume if needed
     if (this.audioCtx.state === 'suspended') {
       this.audioCtx.resume().catch(() => {
-        /* resume may fail before user gesture */
+        /* resume may fail before user gesture; unlock() must be called from tap/click */
       })
     }
     return this.audioCtx
@@ -180,12 +181,23 @@ class AudioServiceImpl {
     this.masterVolume = Math.max(0, Math.min(1, level / 100))
   }
 
-  /** Resume audio context — call on first user interaction (iOS requirement) */
+  /**
+   * Unlock audio on iOS Safari — MUST be called from a user gesture (tap/click).
+   * Resumes suspended AudioContext and primes SpeechSynthesis.
+   */
   unlock() {
-    this.getContext()
+    // Create/resume AudioContext (iOS requires user gesture)
+    const ctx = this.getContext()
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {})
+    }
+
+    // Prime speech synthesis (iOS requires user gesture for first utterance)
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      // Prime speech synthesis with empty utterance
+      window.speechSynthesis.cancel()
       const u = new SpeechSynthesisUtterance('')
+      u.volume = 0
+      u.lang = 'zh-HK'
       window.speechSynthesis.speak(u)
     }
   }

@@ -1,12 +1,15 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { TableNumber } from '../types/game'
+import { audioService } from '../services/AudioService'
 
 export default function HomeScreen() {
   const [selectedTable, setSelectedTable] = useState<TableNumber>(9)
   const navigate = useNavigate()
 
   const handleStart = () => {
+    // Unlock audio on user gesture (required for iOS Safari)
+    audioService.unlock()
     navigate('/game', { state: { startTable: selectedTable } })
   }
 

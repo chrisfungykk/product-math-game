@@ -1,6 +1,34 @@
 import type { VoiceInputResult } from '../types/game'
 
 const CONFIDENCE_THRESHOLD = 75 // 75% minimum confidence to mark as correct
+const DIGIT_MATCH_CONFIDENCE = 90 // confidence when digit skeletons match exactly
+
+// Map Chinese number characters to Arabic digits
+const DIGIT_MAP: Record<string, string> = {
+  '零': '0', '一': '1', '二': '2', '三': '3', '四': '4',
+  '五': '5', '六': '6', '七': '7', '八': '8', '九': '9',
+  // Superscript digits from toneMarks
+  '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
+  '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
+}
+
+// Convert any text (Chinese number chars or Arabic digits) to a pure digit sequence.
+// Structural chars (十, 如, 得, 歸, 中, etc.) are implicitly dropped — only DIGIT_MAP
+// entries and ASCII digits pass through.
+// "九三二十七" → "9327", "9327" → "9327", "九一如九" → "919"
+function toDigitSkeleton(text: string): string {
+  let result = ''
+  for (const ch of text) {
+    if (DIGIT_MAP[ch]) {
+      result += DIGIT_MAP[ch]
+    } else if (ch >= '0' && ch <= '9') {
+      result += ch
+    }
+    // structural chars are silently dropped
+    // non-number Chinese chars (non-digit, non-structural) are also dropped
+  }
+  return result
+}
 
 // Levenshtein distance algorithm for fuzzy matching
 function levenshteinDistance(a: string, b: string): number {
@@ -81,7 +109,7 @@ export function validateCantonese(
   const spokenNorm = normalizeCantonese(spokenText)
   const expectedNorm = normalizeCantonese(expectedChant)
 
-  // 1. Exact match check
+  // 1. Exact match check (after normalization)
   if (spokenNorm === expectedNorm) {
     return {
       spokenText,
@@ -92,7 +120,21 @@ export function validateCantonese(
     }
   }
 
-  // 2. Fuzzy matching using Levenshtein distance
+  // 2. Digit skeleton match — handles ASR engines that return Arabic
+  //    digits ("9327") for Cantonese number words ("九三二十七")
+  const spokenDigits = toDigitSkeleton(spokenNorm)
+  const expectedDigits = toDigitSkeleton(expectedNorm)
+  if (spokenDigits.length > 0 && spokenDigits === expectedDigits) {
+    return {
+      spokenText,
+      matchedChant: expectedChant,
+      confidence: DIGIT_MATCH_CONFIDENCE,
+      isCorrect: true,
+      feedback: '正確！',
+    }
+  }
+
+  // 3. Fuzzy matching using Levenshtein distance
   const distance = levenshteinDistance(spokenNorm, expectedNorm)
   const maxDistance = Math.ceil(expectedNorm.length * 0.2) // 20% tolerance
 
@@ -109,7 +151,7 @@ export function validateCantonese(
     }
   }
 
-  // 3. Character-level fallback
+  // 4. Character-level fallback
   const matchedChars = countMatchingCharacters(spokenNorm, expectedNorm)
   const accuracy = (matchedChars / expectedNorm.length) * 100
 
