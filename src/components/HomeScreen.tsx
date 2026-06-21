@@ -93,8 +93,8 @@ export default function HomeScreen() {
           <div className="mt-6 text-sm text-gray-600 text-center cantonese-text">
             {mode === 'timed' ? (
               <>
-                <p>10 秒內一口氣讀晒成個乘數表</p>
-                <p>考你速度同記憶力！</p>
+                <p>每句 20 秒，答啱自動下一句</p>
+                <p>時間到會留低俾你再試！</p>
               </>
             ) : (
               <>

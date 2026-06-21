@@ -5,6 +5,10 @@ const CONFIDENCE_THRESHOLD = 75 // 75% minimum confidence to mark as correct
 const DIGIT_MATCH_CONFIDENCE = 90 // confidence when digit skeletons match exactly
 const JYUTPING_MATCH_CONFIDENCE = 88 // confidence when pronunciation skeletons match
 
+interface ValidationOptions {
+  strict?: boolean
+}
+
 // Levenshtein distance algorithm for fuzzy matching
 function levenshteinDistance(a: string, b: string): number {
   const matrix: number[][] = []
@@ -36,8 +40,8 @@ function levenshteinDistance(a: string, b: string): number {
 
 // Normalize Cantonese text
 function normalizeCantonese(text: string): string {
-  // Remove punctuation and spaces
-  let normalized = text.replace(/[，。！？；：、\s]/g, '')
+  // Normalize full-width forms, then remove punctuation and spaces.
+  let normalized = text.normalize('NFKC').replace(/[\p{P}\s]/gu, '')
 
   // Strip combining diacritical marks (tone accents) so toned and
   // un-toned romanizations compare equal. Decompose then drop marks.
@@ -68,7 +72,8 @@ function countMatchingCharacters(spoken: string, expected: string): number {
  */
 export function validateCantonese(
   spokenText: string,
-  expectedChant: string
+  expectedChant: string,
+  options: ValidationOptions = {}
 ): VoiceInputResult {
   if (!spokenText || !expectedChant) {
     return {
@@ -83,6 +88,7 @@ export function validateCantonese(
   // Normalize both inputs
   const spokenNorm = normalizeCantonese(spokenText)
   const expectedNorm = normalizeCantonese(expectedChant)
+  const strict = options.strict === true
 
   // 1. Exact match check (after normalization)
   if (spokenNorm === expectedNorm) {
@@ -126,7 +132,10 @@ export function validateCantonese(
     }
     // Allow one slipped syllable for longer chants (~15% of length).
     const jyutDist = levenshteinDistance(spokenJyut, expectedJyut)
-    if (jyutDist <= Math.ceil(expectedJyut.length * 0.15)) {
+    if (
+      (!strict || spokenJyut.length >= expectedJyut.length) &&
+      jyutDist <= Math.ceil(expectedJyut.length * 0.15)
+    ) {
       return {
         spokenText,
         matchedChant: expectedChant,
@@ -141,7 +150,7 @@ export function validateCantonese(
   const distance = levenshteinDistance(spokenNorm, expectedNorm)
   const maxDistance = Math.ceil(expectedNorm.length * 0.2) // 20% tolerance
 
-  if (distance <= maxDistance) {
+  if ((!strict || spokenNorm.length >= expectedNorm.length) && distance <= maxDistance) {
     const confidence = Math.max(0, 100 - (distance * (100 / expectedNorm.length)))
     const isCorrect = confidence >= CONFIDENCE_THRESHOLD
 
@@ -173,7 +182,8 @@ export function validateCantonese(
  */
 export function validateAlternatives(
   alternatives: Array<{ transcript: string; confidence: number }>,
-  expectedChant: string
+  expectedChant: string,
+  options: ValidationOptions = {}
 ): VoiceInputResult {
   if (!alternatives || alternatives.length === 0) {
     return {
@@ -186,11 +196,11 @@ export function validateAlternatives(
   }
 
   // Find best match among alternatives
-  let bestResult = validateCantonese(alternatives[0].transcript, expectedChant)
+  let bestResult = validateCantonese(alternatives[0].transcript, expectedChant, options)
   let bestScore = bestResult.confidence
 
   for (let i = 1; i < alternatives.length; i++) {
-    const result = validateCantonese(alternatives[i].transcript, expectedChant)
+    const result = validateCantonese(alternatives[i].transcript, expectedChant, options)
     if (result.confidence > bestScore) {
       bestResult = result
       bestScore = result.confidence

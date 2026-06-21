@@ -23,7 +23,7 @@ const DIGIT_MAP: Record<string, string> = {
   兩: '2', // 兩 (loeng5) = "two" in counting contexts
   // Financial / variant numerals an ASR may emit
   壹: '1', 貳: '2', 參: '3', 叁: '3', 肆: '4', 伍: '5',
-  陸: '6', 柒: '7', 捌: '8', 玖: '9', 拾: '10',
+  陸: '6', 柒: '7', 捌: '8', 玖: '9',
   // Common homophones returned by speech engines
   狗: '9', 韭: '9', 叭: '8', 漆: '7', 碌: '6',
   // Superscript digits (from chant toneMarks rendering)

@@ -8,6 +8,10 @@ interface TimedResultsState {
   elapsedSec?: number
   confidence?: number
   spokenText?: string
+  totalLines?: number
+  correctLines?: number
+  misses?: number
+  averageConfidence?: number
 }
 
 export default function ResultsScreen() {
@@ -36,11 +40,17 @@ export default function ResultsScreen() {
   // Star rating
   const practiceStars = accuracy >= 90 ? 3 : accuracy >= 70 ? 2 : accuracy >= 50 ? 1 : 0
 
-  // Timed stars: speed + pass
+  const timedTotalLines = timedData?.totalLines ?? 1
+  const timedCorrectLines =
+    timedData?.correctLines ?? (timedData?.passed ? timedTotalLines : 0)
+  const timedMisses = timedData?.misses ?? 0
+  const timedAverageConfidence = timedData?.averageConfidence ?? timedData?.confidence ?? 0
+
+  // Timed stars: complete all lines, with fewer retries earning more stars.
   const timedStars = timedData?.passed
-    ? timedData.elapsedSec! <= 5
+    ? timedMisses === 0
       ? 3
-      : timedData.elapsedSec! <= 7
+      : timedMisses <= 2
         ? 2
         : 1
     : 0
@@ -88,9 +98,21 @@ export default function ResultsScreen() {
               </span>
             </div>
             <div className="flex justify-between items-center bg-gray-50 rounded-lg px-4 py-3">
-              <span className="text-gray-600 cantonese-text">準確度</span>
+              <span className="text-gray-600 cantonese-text">答對句數</span>
               <span className="text-2xl font-bold text-green-600">
-                {timedData.confidence}%
+                {timedCorrectLines}/{timedTotalLines}
+              </span>
+            </div>
+            <div className="flex justify-between items-center bg-gray-50 rounded-lg px-4 py-3">
+              <span className="text-gray-600 cantonese-text">重試/逾時</span>
+              <span className="text-2xl font-bold text-orange-500">
+                {timedMisses}
+              </span>
+            </div>
+            <div className="flex justify-between items-center bg-gray-50 rounded-lg px-4 py-3">
+              <span className="text-gray-600 cantonese-text">平均準確度</span>
+              <span className="text-2xl font-bold text-green-600">
+                {timedAverageConfidence}%
               </span>
             </div>
           </div>
@@ -98,11 +120,11 @@ export default function ResultsScreen() {
           {/* Encouragement */}
           <p className="text-gray-600 cantonese-text mb-6">
             {stars === 3
-              ? '神速！你係快槍手！'
+              ? '又準又穩，完成得好靚！'
               : stars === 2
-                ? '好快！再練下就完美！'
+                ? '好穩陣！再練少少就滿分！'
                 : stars === 1
-                  ? '過咗！下次再快啲！'
+                  ? '完成咗！下次試吓少啲重試！'
                   : '繼續練習，你會越來越快！'}
           </p>
 

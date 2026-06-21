@@ -2,14 +2,16 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import GameCanvas from './GameCanvas'
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
-import { validateCantonese, validateAlternatives } from '../utils/voiceValidation'
+import { validateAlternatives, validateCantonese } from '../utils/voiceValidation'
 import { getChantsByTable } from '../utils/chantData'
 import { audioService } from '../services/AudioService'
-import { isSafari, cantoneseLangCandidates } from '../utils/browser'
+import { cantoneseLangCandidates, isSafari } from '../utils/browser'
 import type { TableNumber, VoiceInputResult } from '../types/game'
 import type { AmeliaAnimation } from './scene/AmeliaCharacter'
 
-const TIME_LIMIT = 10 // seconds
+const LINE_TIME_LIMIT = 20 // seconds per chant line
+const AUTO_ADVANCE_DELAY_MS = 900
+const RETRY_DELAY_MS = 900
 
 interface TimedResult {
   table: TableNumber
@@ -17,6 +19,10 @@ interface TimedResult {
   elapsedSec: number
   confidence: number
   spokenText: string
+  totalLines: number
+  correctLines: number
+  misses: number
+  averageConfidence: number
 }
 
 export default function TimedGameScreen() {
@@ -37,135 +43,309 @@ export default function TimedGameScreen() {
   } = useSpeechRecognition(cantoneseLangCandidates(), true)
 
   const safari = isSafari()
+  const lines = getChantsByTable(startTable)
+  const totalLines = lines.length
 
   const [phase, setPhase] = useState<'ready' | 'counting' | 'done'>('ready')
-  const [timeLeft, setTimeLeft] = useState(TIME_LIMIT)
+  const [currentLineIndex, setCurrentLineIndex] = useState(0)
+  const [timeLeft, setTimeLeft] = useState(LINE_TIME_LIMIT)
   const [animation, setAnimation] = useState<AmeliaAnimation>('idle')
   const [timedResult, setTimedResult] = useState<TimedResult | null>(null)
+  const [manualMode, setManualMode] = useState(false)
   const [manualText, setManualText] = useState('')
+  const [feedback, setFeedback] = useState<string | null>(null)
+  const [correctLines, setCorrectLines] = useState(0)
+  const [misses, setMisses] = useState(0)
 
   const startedAtRef = useRef(0)
+  const lineStartedAtRef = useRef(0)
   const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
+  const transitionTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const doneRef = useRef(false)
+  const processingRef = useRef(false)
+  const missesRef = useRef(0)
+  const correctResultsRef = useRef<VoiceInputResult[]>([])
+  const spokenHistoryRef = useRef<string[]>([])
 
-  const lines = getChantsByTable(startTable)
-  const expectedFull = lines.map((l) => l.cantonese).join('')
+  const currentLine = lines[currentLineIndex]
+  const showManual = manualMode || !isSupported
 
-  // Finish: validate and show result
-  const finish = useCallback(
-    (elapsed: number) => {
+  const clearTransitionTimer = () => {
+    if (transitionTimerRef.current) {
+      clearTimeout(transitionTimerRef.current)
+      transitionTimerRef.current = undefined
+    }
+  }
+
+  const resetLineClock = useCallback(() => {
+    lineStartedAtRef.current = Date.now()
+    setTimeLeft(LINE_TIME_LIMIT)
+  }, [])
+
+  const finishRun = useCallback(
+    (nextResults: VoiceInputResult[]) => {
       if (doneRef.current) return
+
       doneRef.current = true
+      processingRef.current = true
       stopListening()
+      clearTransitionTimer()
       if (intervalRef.current) clearInterval(intervalRef.current)
 
-      const spoken = finalText || interimText
-      let result: VoiceInputResult
-      if (alternatives.length > 1) {
-        result = validateAlternatives(alternatives, expectedFull)
-      } else {
-        result = validateCantonese(spoken, expectedFull)
-      }
+      const elapsedSec = Math.max(0, (Date.now() - startedAtRef.current) / 1000)
+      const correctLineCount = nextResults.length
+      const averageConfidence =
+        correctLineCount > 0
+          ? Math.round(
+              nextResults.reduce((sum, result) => sum + result.confidence, 0) /
+                correctLineCount
+            )
+          : 0
+      const passed = correctLineCount === totalLines
+      const spokenText = spokenHistoryRef.current.filter(Boolean).join(' ')
 
-      const passed = result.isCorrect
-      audioService.playEffect(passed ? 'correct' : 'incorrect')
-      setAnimation(passed ? 'celebrate' : 'error')
-      setTimedResult({
+      const resultState: TimedResult = {
         table: startTable,
         passed,
-        elapsedSec: Math.min(elapsed, TIME_LIMIT),
-        confidence: result.confidence,
-        spokenText: result.spokenText,
-      })
+        elapsedSec,
+        confidence: averageConfidence,
+        spokenText,
+        totalLines,
+        correctLines: correctLineCount,
+        misses: missesRef.current,
+        averageConfidence,
+      }
 
-      setTimeout(() => {
+      setTimedResult(resultState)
+      setPhase('done')
+      setAnimation(passed ? 'celebrate' : 'error')
+      audioService.playEffect(passed ? 'level-complete' : 'incorrect')
+
+      transitionTimerRef.current = setTimeout(() => {
         navigate('/results', {
           state: {
             timed: true,
-            table: startTable,
-            passed,
-            elapsedSec: Math.min(elapsed, TIME_LIMIT),
-            confidence: result.confidence,
-            spokenText: result.spokenText,
+            table: resultState.table,
+            passed: resultState.passed,
+            elapsedSec: resultState.elapsedSec,
+            confidence: resultState.confidence,
+            spokenText: resultState.spokenText,
+            totalLines: resultState.totalLines,
+            correctLines: resultState.correctLines,
+            misses: resultState.misses,
+            averageConfidence: resultState.averageConfidence,
           },
         })
-      }, 2500)
+      }, 1800)
+    },
+    [navigate, startTable, stopListening, totalLines]
+  )
+
+  const scheduleRetry = useCallback(
+    (message: string) => {
+      if (doneRef.current) return
+
+      processingRef.current = true
+      stopListening()
+      resetTranscript()
+      clearTransitionTimer()
+
+      missesRef.current += 1
+      setMisses(missesRef.current)
+      setFeedback(message)
+      setAnimation('error')
+      audioService.playEffect('incorrect')
+
+      transitionTimerRef.current = setTimeout(() => {
+        resetTranscript()
+        resetLineClock()
+        setFeedback(null)
+        setAnimation('idle')
+        processingRef.current = false
+
+        if (!showManual) {
+          startListening()
+        }
+      }, RETRY_DELAY_MS)
+    },
+    [resetLineClock, resetTranscript, showManual, startListening, stopListening]
+  )
+
+  const handleLineCorrect = useCallback(
+    (result: VoiceInputResult) => {
+      if (processingRef.current || doneRef.current) return
+
+      processingRef.current = true
+      stopListening()
+      resetTranscript()
+      clearTransitionTimer()
+
+      const nextResults = [...correctResultsRef.current, result]
+      correctResultsRef.current = nextResults
+      spokenHistoryRef.current = [...spokenHistoryRef.current, result.spokenText]
+      setCorrectLines(nextResults.length)
+      setFeedback('正確！')
+      setAnimation('celebrate')
+      audioService.playEffect('correct')
+
+      if (currentLineIndex >= totalLines - 1) {
+        transitionTimerRef.current = setTimeout(() => {
+          finishRun(nextResults)
+        }, AUTO_ADVANCE_DELAY_MS)
+        return
+      }
+
+      transitionTimerRef.current = setTimeout(() => {
+        setCurrentLineIndex((index) => index + 1)
+        resetTranscript()
+        resetLineClock()
+        setManualText('')
+        setFeedback(null)
+        setAnimation('idle')
+        processingRef.current = false
+
+        if (!showManual) {
+          startListening()
+        }
+      }, AUTO_ADVANCE_DELAY_MS)
     },
     [
-      stopListening, finalText, interimText, alternatives, expectedFull,
-      startTable, navigate,
+      currentLineIndex,
+      finishRun,
+      resetLineClock,
+      resetTranscript,
+      showManual,
+      startListening,
+      stopListening,
+      totalLines,
     ]
   )
 
-  // Countdown timer
+  const handleLineTimeout = useCallback(() => {
+    if (phase !== 'counting' || processingRef.current || doneRef.current) return
+    scheduleRetry('時間到，再試一次')
+  }, [phase, scheduleRetry])
+
   useEffect(() => {
     if (phase !== 'counting') return
+
     intervalRef.current = setInterval(() => {
-      const elapsed = (Date.now() - startedAtRef.current) / 1000
-      const remaining = Math.max(0, TIME_LIMIT - elapsed)
+      if (processingRef.current) return
+
+      const elapsed = (Date.now() - lineStartedAtRef.current) / 1000
+      const remaining = Math.max(0, LINE_TIME_LIMIT - elapsed)
       setTimeLeft(remaining)
+
       if (remaining <= 0) {
-        finish(TIME_LIMIT)
+        handleLineTimeout()
       }
     }, 100)
+
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [phase, finish])
+  }, [handleLineTimeout, phase])
 
-  // Start
+  useEffect(() => {
+    if (phase !== 'counting' || processingRef.current || !currentLine || showManual) {
+      return
+    }
+
+    const candidates = [...alternatives]
+    if (finalText) candidates.push({ transcript: finalText, confidence: 1 })
+    if (interimText) candidates.push({ transcript: interimText, confidence: 0 })
+    if (candidates.length === 0) return
+
+    const result = validateAlternatives(candidates, currentLine.cantonese, {
+      strict: true,
+    })
+
+    if (result.isCorrect) {
+      handleLineCorrect(result)
+    }
+  }, [
+    alternatives,
+    currentLine,
+    finalText,
+    handleLineCorrect,
+    interimText,
+    phase,
+    showManual,
+  ])
+
+  useEffect(() => {
+    return () => {
+      stopListening()
+      if (intervalRef.current) clearInterval(intervalRef.current)
+      clearTransitionTimer()
+    }
+  }, [stopListening])
+
   const handleStart = () => {
     audioService.unlock()
+    doneRef.current = false
+    processingRef.current = false
+    missesRef.current = 0
+    correctResultsRef.current = []
+    spokenHistoryRef.current = []
+    clearTransitionTimer()
+
+    setCurrentLineIndex(0)
+    setCorrectLines(0)
+    setMisses(0)
+    setFeedback(null)
+    setManualText('')
+    setTimedResult(null)
+    setAnimation('idle')
     resetTranscript()
     startedAtRef.current = Date.now()
-    setTimeLeft(TIME_LIMIT)
+    resetLineClock()
     setPhase('counting')
-    startListening()
-  }
 
-  // Manual stop (tap mic while counting)
-  const handleStop = () => {
-    const elapsed = (Date.now() - startedAtRef.current) / 1000
-    finish(elapsed)
-  }
-
-  // Manual text submit fallback
-  const handleManualSubmit = () => {
-    if (!manualText.trim()) return
-    audioService.unlock()
-    // Measure time manually — start "counting" on first submit
-    if (phase === 'ready') {
-      startedAtRef.current = Date.now()
+    if (!showManual) {
+      startListening()
     }
-    const elapsed = (Date.now() - startedAtRef.current) / 1000
-    const result = validateCantonese(manualText, expectedFull)
-    doneRef.current = true
-    if (intervalRef.current) clearInterval(intervalRef.current)
-    setAnimation(result.isCorrect ? 'celebrate' : 'error')
-    audioService.playEffect(result.isCorrect ? 'correct' : 'incorrect')
-    setTimedResult({
-      table: startTable,
-      passed: result.isCorrect,
-      elapsedSec: Math.min(elapsed, TIME_LIMIT),
-      confidence: result.confidence,
-      spokenText: result.spokenText,
-    })
-    setTimeout(() => {
-      navigate('/results', {
-        state: {
-          timed: true,
-          table: startTable,
-          passed: result.isCorrect,
-          elapsedSec: Math.min(elapsed, TIME_LIMIT),
-          confidence: result.confidence,
-          spokenText: result.spokenText,
-        },
-      })
-    }, 2500)
   }
 
-  // Countdown bar color
-  const barFraction = timeLeft / TIME_LIMIT
+  const handleManualSubmit = () => {
+    if (!manualText.trim() || !currentLine || processingRef.current) return
+
+    audioService.unlock()
+    const result = validateCantonese(manualText, currentLine.cantonese, {
+      strict: true,
+    })
+    setManualText('')
+
+    if (result.isCorrect) {
+      handleLineCorrect(result)
+      return
+    }
+
+    scheduleRetry(result.feedback)
+  }
+
+  const handleUseManual = () => {
+    stopListening()
+    resetTranscript()
+    setManualMode(true)
+  }
+
+  const handleUseVoice = () => {
+    setManualMode(false)
+    resetTranscript()
+
+    if (phase === 'counting' && !processingRef.current) {
+      startListening()
+    }
+  }
+
+  const handleExit = () => {
+    stopListening()
+    audioService.stopSpeaking()
+    navigate('/')
+  }
+
+  const barFraction = timeLeft / LINE_TIME_LIMIT
   const barColor =
     barFraction > 0.5
       ? 'bg-green-500'
@@ -173,19 +353,25 @@ export default function TimedGameScreen() {
         ? 'bg-yellow-400'
         : 'bg-red-500'
 
-  // Done flash
+  if (!currentLine) {
+    return (
+      <div className="w-full h-screen flex items-center justify-center bg-gray-900">
+        <p className="text-white cantonese-text">加載中...</p>
+      </div>
+    )
+  }
+
   if (phase === 'done' && timedResult) {
-    const { passed, elapsedSec } = timedResult
     return (
       <div className="w-full h-screen flex flex-col items-center justify-center bg-gradient-to-br from-purple-600 to-pink-600">
         <div className="text-7xl mb-4 animate-bounce">
-          {passed ? '🎉' : '⏰'}
+          {timedResult.passed ? '🎉' : '⏰'}
         </div>
         <h1 className="text-white text-4xl font-bold cantonese-text mb-2">
-          {passed ? '過關！' : '時間到！'}
+          {timedResult.passed ? '完成！' : '再接再厲'}
         </h1>
         <p className="text-white/80 cantonese-text text-xl">
-          {elapsedSec.toFixed(1)} 秒
+          {timedResult.correctLines}/{timedResult.totalLines} 句
         </p>
       </div>
     )
@@ -193,7 +379,6 @@ export default function TimedGameScreen() {
 
   return (
     <div className="relative w-full h-screen overflow-hidden">
-      {/* 3D Canvas background */}
       <div className="absolute inset-0">
         <Suspense
           fallback={
@@ -206,7 +391,6 @@ export default function TimedGameScreen() {
         </Suspense>
       </div>
 
-      {/* Countdown bar */}
       {phase === 'counting' && (
         <div className="absolute top-0 inset-x-0 h-2 bg-gray-800/50 z-10">
           <div
@@ -216,15 +400,13 @@ export default function TimedGameScreen() {
         </div>
       )}
 
-      {/* Overlay UI */}
       <div className="absolute inset-0 flex flex-col items-center justify-between py-8 px-4 z-10 pointer-events-none">
-        {/* Top: table title + timer */}
         <div className="flex flex-col items-center gap-1 pointer-events-auto">
           <h1 className="text-white text-3xl font-bold cantonese-text drop-shadow-lg">
             背 {startTable} 因歌
           </h1>
           <p className="text-white/70 cantonese-text text-sm">
-            一口氣讀晒成個表 • {TIME_LIMIT} 秒內
+            第 {currentLineIndex + 1}/{totalLines} 句 • 每句 {LINE_TIME_LIMIT} 秒
           </p>
           {phase === 'counting' && (
             <div className="text-white font-mono font-bold mt-1">
@@ -236,27 +418,62 @@ export default function TimedGameScreen() {
               <span className="text-lg text-white/60"> 秒</span>
             </div>
           )}
+          {phase === 'counting' && (
+            <p className="text-white/70 cantonese-text text-xs">
+              答對 {correctLines}/{totalLines} • 重試 {misses}
+            </p>
+          )}
         </div>
 
-        {/* Center: chant reference table */}
-        <div className="bg-black/40 backdrop-blur rounded-xl px-6 py-4 pointer-events-auto max-h-[45vh] overflow-y-auto">
-          <div className="grid grid-cols-3 gap-x-6 gap-y-1">
-            {lines.map((line) => (
-              <div key={line.multiplier} className="text-white text-sm cantonese-text whitespace-nowrap">
-                {line.cantonese}
-              </div>
-            ))}
+        <div className="flex flex-col items-center gap-4 pointer-events-auto w-full max-w-lg">
+          <div className="bg-black/40 backdrop-blur rounded-xl px-5 py-4 max-h-[36vh] overflow-y-auto">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {lines.map((line, index) => (
+                <div
+                  key={line.multiplier}
+                  className={`rounded-md px-3 py-2 text-sm cantonese-text whitespace-nowrap transition-colors ${
+                    index < currentLineIndex
+                      ? 'bg-green-500/20 text-green-100'
+                      : index === currentLineIndex
+                        ? 'bg-white/20 text-white font-bold'
+                        : 'text-white/45'
+                  }`}
+                >
+                  {line.cantonese}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="text-center">
+            <p className="text-white/70 text-sm cantonese-text mb-1">
+              目前口訣
+            </p>
+            <p className="text-white text-4xl font-bold cantonese-text tracking-wider drop-shadow-lg">
+              {currentLine.cantonese}
+            </p>
           </div>
         </div>
 
-        {/* Bottom: mic / input area */}
         <div className="flex flex-col items-center gap-3 w-full max-w-sm pointer-events-auto">
-          {/* Interim text */}
+          {feedback && (
+            <div
+              className={`px-5 py-2 rounded-full cantonese-text font-bold text-base ${
+                feedback.includes('正確')
+                  ? 'bg-green-500/90 text-white'
+                  : 'bg-orange-500/90 text-white'
+              }`}
+            >
+              {feedback}
+            </div>
+          )}
+
           {isListening && interimText && (
             <p className="text-white/70 text-sm cantonese-text italic text-center">
               {interimText}...
             </p>
           )}
+
           {isListening && safari && (
             <div className="flex items-end justify-center gap-1 h-[40px] w-full max-w-xs rounded-lg bg-black/30">
               {[0, 1, 2, 3, 4, 5, 6].map((i) => (
@@ -273,7 +490,6 @@ export default function TimedGameScreen() {
             </div>
           )}
 
-          {/* Error */}
           {error && (
             <p className="text-red-300 text-sm cantonese-text">
               {error === 'no-speech'
@@ -284,10 +500,9 @@ export default function TimedGameScreen() {
             </p>
           )}
 
-          {/* Voice mode */}
-          {isSupported ? (
+          {!showManual ? (
             <div className="flex flex-col items-center gap-2">
-              {phase === 'ready' && (
+              {phase === 'ready' ? (
                 <button
                   onClick={handleStart}
                   className="w-24 h-24 rounded-full flex items-center justify-center text-4xl shadow-lg bg-blue-600 hover:bg-blue-700 active:scale-95 transition-all"
@@ -295,55 +510,75 @@ export default function TimedGameScreen() {
                 >
                   🎤
                 </button>
-              )}
-              {phase === 'counting' && (
+              ) : (
                 <button
-                  onClick={handleStop}
-                  className="w-24 h-24 rounded-full flex items-center justify-center text-4xl shadow-lg bg-red-500 animate-pulse active:scale-95 transition-all"
-                  aria-label="停止錄音"
+                  onClick={isListening ? stopListening : startListening}
+                  className={`w-24 h-24 rounded-full flex items-center justify-center text-4xl shadow-lg active:scale-95 transition-all ${
+                    isListening ? 'bg-red-500 animate-pulse' : 'bg-blue-600'
+                  }`}
+                  aria-label={isListening ? '停止錄音' : '開始錄音'}
                 >
-                  ⏹️
+                  {isListening ? '⏹️' : '🎤'}
                 </button>
               )}
               <p className="text-white/80 text-sm cantonese-text">
-                {phase === 'ready'
-                  ? '點擊開始挑戰'
-                  : phase === 'counting'
-                    ? '讀完按停止'
-                    : ''}
+                {phase === 'ready' ? '點擊開始挑戰' : '收音中，答啱會自動下一句'}
               </p>
               <button
-                onClick={() => setPhase('ready')}
+                onClick={handleUseManual}
                 className="text-white/50 text-xs underline cantonese-text"
               >
                 改用文字輸入
               </button>
             </div>
           ) : (
-            /* Manual input fallback */
             <div className="flex flex-col gap-2 w-full max-w-sm">
               <textarea
                 value={manualText}
                 onChange={(e) => setManualText(e.target.value)}
-                placeholder="輸入成個乘數表..."
+                placeholder="輸入目前口訣..."
                 className="w-full px-3 py-2 rounded-lg cantonese-text text-gray-800 text-sm resize-none"
-                rows={3}
+                rows={2}
+                disabled={phase === 'done'}
               />
-              <button
-                onClick={handleManualSubmit}
-                disabled={doneRef.current}
-                className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg cantonese-text text-lg transition-all active:scale-95"
-              >
-                提交
-              </button>
+              <div className="flex gap-2">
+                {phase === 'ready' ? (
+                  <button
+                    onClick={handleStart}
+                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg cantonese-text text-base transition-all active:scale-95"
+                  >
+                    開始
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleManualSubmit}
+                    disabled={processingRef.current}
+                    className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-bold py-3 px-4 rounded-lg cantonese-text text-base transition-all active:scale-95"
+                  >
+                    提交
+                  </button>
+                )}
+                {isSupported && (
+                  <button
+                    onClick={handleUseVoice}
+                    className="bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-3 px-4 rounded-lg cantonese-text text-base transition-all active:scale-95"
+                  >
+                    語音
+                  </button>
+                )}
+              </div>
+              {!isSupported && (
+                <p className="text-white/50 text-xs cantonese-text text-center">
+                  此瀏覽器不支援語音輸入
+                </p>
+              )}
             </div>
           )}
         </div>
       </div>
 
-      {/* Exit button */}
       <button
-        onClick={() => navigate('/')}
+        onClick={handleExit}
         className="absolute top-4 left-4 z-20 bg-black/30 hover:bg-black/50 text-white px-3 py-1 rounded-lg cantonese-text text-sm transition-all"
       >
         ← 返主頁
