@@ -1,0 +1,28 @@
+{
+  "name": "背口決 九因歌遊戲",
+  "short_name": "背口決",
+  "description": "用聲音學習廣東乘法表 - Amelia 陪你背口訣",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#0066cc",
+  "background_color": "#667eea",
+  "lang": "zh-HK",
+  "dir": "ltr",
+  "categories": ["education", "games", "kids"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
