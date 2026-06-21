@@ -1,4 +1,5 @@
 import type { SoundEffectType } from '../types/audio'
+import { getAudioContextClass } from '../utils/browser'
 
 /**
  * AudioService - handles all game audio without binary assets.
@@ -18,6 +19,16 @@ class AudioServiceImpl {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       this.loadVoices()
       window.speechSynthesis.onvoiceschanged = () => this.loadVoices()
+      // Safari often never fires onvoiceschanged and populates the list a tick
+      // late — poll briefly until voices appear.
+      let tries = 0
+      const poll = window.setInterval(() => {
+        if (this.voicesLoaded || tries++ > 10) {
+          window.clearInterval(poll)
+          return
+        }
+        this.loadVoices()
+      }, 250)
     }
   }
 
@@ -34,7 +45,11 @@ class AudioServiceImpl {
 
   private getContext(): AudioContext {
     if (!this.audioCtx) {
-      this.audioCtx = new AudioContext()
+      const Ctx = getAudioContextClass()
+      // Web Audio unsupported (very old browser) — callers catch this; SFX
+      // simply won't play.
+      if (!Ctx) throw new Error('Web Audio API not supported')
+      this.audioCtx = new Ctx()
     }
     // iOS Safari suspends AudioContext until user gesture — resume if needed
     if (this.audioCtx.state === 'suspended') {
@@ -111,7 +126,12 @@ class AudioServiceImpl {
    */
   playEffect(effectType: SoundEffectType) {
     if (this.muted) return
-    const ctx = this.getContext()
+    let ctx: AudioContext
+    try {
+      ctx = this.getContext()
+    } catch {
+      return // Web Audio unavailable — silently skip SFX
+    }
     const now = ctx.currentTime
 
     switch (effectType) {
@@ -187,9 +207,15 @@ class AudioServiceImpl {
    */
   unlock() {
     // Create/resume AudioContext (iOS requires user gesture)
-    const ctx = this.getContext()
-    if (ctx.state === 'suspended') {
-      ctx.resume().catch(() => {})
+    try {
+      const ctx = this.getContext()
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {
+          /* resume can still reject pre-gesture; ignore */
+        })
+      }
+    } catch {
+      /* Web Audio unavailable — speech priming below still runs */
     }
 
     // Prime speech synthesis (iOS requires user gesture for first utterance)

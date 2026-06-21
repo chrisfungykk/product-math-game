@@ -49,6 +49,12 @@ button:disabled {
   letter-spacing: 0.05em;
 }
 
+/* Voice input pulse bars (Safari fallback when live waveform is unavailable) */
+@keyframes voicePulse {
+  0%, 100% { transform: scaleY(0.3); opacity: 0.5; }
+  50% { transform: scaleY(1); opacity: 1; }
+}
+
 /* Safe area support for notched devices */
 .safe-area-top {
   padding-top: max(1rem, env(safe-area-inset-top));

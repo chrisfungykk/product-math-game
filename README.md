@@ -65,7 +65,20 @@ Both auto-detect Vite, run `npm run build`, and publish `dist/`.
 
 ## Browser Support
 
-Voice **recognition** (`yue-Hant-HK`) works best in Chrome/Edge. Safari/iOS has limited Cantonese recognition — the app automatically falls back to manual text input. Voice **synthesis** (Amelia's chant) works where a Cantonese/Chinese system voice is installed.
+| Browser | Recognition | Notes |
+|---------|-------------|-------|
+| **Chrome / Edge** (desktop & Android) | ✅ `yue-Hant-HK` | Best results. Live mic waveform. |
+| **Safari** (macOS & iOS) | ⚠️ via `zh-HK` | Recognizer rejects `yue-*`, so the app auto-retries with `zh-HK`. Waveform replaced by a pulse animation to avoid mic contention that breaks Safari recognition. |
+| Other / unsupported | — | Auto-falls back to manual text input. |
+
+**Cross-browser handling** (`src/utils/browser.ts`):
+- `AudioContext` resolved with `webkitAudioContext` fallback (older Safari).
+- `SpeechRecognition` resolved with `webkitSpeechRecognition` fallback.
+- Cantonese language tags tried in order, with automatic `language-not-supported` retry.
+
+**Recognition accuracy** (`src/utils/cantoneseMatch.ts`): speech is matched on two tone-stripped signals — a **digit skeleton** (robust to ASR returning Arabic digits like `27` for `二十七`) and a **jyutping pronunciation skeleton** (robust to homophone characters like 狗→九, 於→如, 鐘→中). A curated homophone table covers the full 九因歌 vocabulary.
+
+Voice **synthesis** (Amelia's chant) works where a Cantonese/Chinese system voice is installed; Safari's late voice list is polled until ready.
 
 ## Project Structure
 

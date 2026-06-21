@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
 import { validateAlternatives, validateCantonese } from '../utils/voiceValidation'
+import { getAudioContextClass, isSafari } from '../utils/browser'
 import type { VoiceInputResult } from '../types/game'
 
 interface VoiceInputProps {
@@ -19,7 +20,12 @@ export default function VoiceInput({ expectedChant, onResult, disabled }: VoiceI
     error,
     startListening,
     stopListening,
-  } = useSpeechRecognition('yue-Hant-HK')
+  } = useSpeechRecognition()
+
+  // Safari routes a single mic to SpeechRecognition; opening a second
+  // getUserMedia stream for the waveform starves the recognizer and breaks
+  // recognition. Skip the live waveform there and show a CSS pulse instead.
+  const safari = isSafari()
 
   const [manualMode, setManualMode] = useState(false)
   const [manualText, setManualText] = useState('')
@@ -40,9 +46,9 @@ export default function VoiceInput({ expectedChant, onResult, disabled }: VoiceI
     }
   }, [finalText, alternatives, expectedChant, onResult])
 
-  // Waveform visualization
+  // Waveform visualization (skipped on Safari — see `safari` note above)
   useEffect(() => {
-    if (!isListening) {
+    if (!isListening || safari) {
       // Cleanup
       if (animationRef.current) cancelAnimationFrame(animationRef.current)
       streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -55,6 +61,8 @@ export default function VoiceInput({ expectedChant, onResult, disabled }: VoiceI
     }
 
     let mounted = true
+    const AudioCtx = getAudioContextClass()
+    if (!AudioCtx) return
 
     navigator.mediaDevices
       .getUserMedia({ audio: true })
@@ -64,7 +72,7 @@ export default function VoiceInput({ expectedChant, onResult, disabled }: VoiceI
           return
         }
         streamRef.current = stream
-        const audioCtx = new AudioContext()
+        const audioCtx = new AudioCtx()
         audioCtxRef.current = audioCtx
         const source = audioCtx.createMediaStreamSource(stream)
         const analyser = audioCtx.createAnalyser()
@@ -112,7 +120,7 @@ export default function VoiceInput({ expectedChant, onResult, disabled }: VoiceI
       mounted = false
       if (animationRef.current) cancelAnimationFrame(animationRef.current)
     }
-  }, [isListening])
+  }, [isListening, safari])
 
   const handleManualSubmit = () => {
     if (!manualText.trim()) return
@@ -126,14 +134,31 @@ export default function VoiceInput({ expectedChant, onResult, disabled }: VoiceI
 
   return (
     <div className="flex flex-col items-center gap-3 w-full">
-      {/* Waveform */}
-      {isListening && (
+      {/* Waveform (Chrome/Edge) — live mic visualization */}
+      {isListening && !safari && (
         <canvas
           ref={canvasRef}
           width={300}
           height={60}
           className="rounded-lg bg-black/30 w-full max-w-xs"
         />
+      )}
+
+      {/* Safari fallback — animated pulse bars (no 2nd mic stream) */}
+      {isListening && safari && (
+        <div className="flex items-end justify-center gap-1 h-[60px] w-full max-w-xs rounded-lg bg-black/30">
+          {[0, 1, 2, 3, 4, 5, 6].map((i) => (
+            <span
+              key={i}
+              className="w-2 rounded-full bg-blue-400"
+              style={{
+                height: '70%',
+                transformOrigin: 'bottom',
+                animation: `voicePulse 0.9s ease-in-out ${i * 0.1}s infinite`,
+              }}
+            />
+          ))}
+        </div>
       )}
 
       {/* Interim text display */}
