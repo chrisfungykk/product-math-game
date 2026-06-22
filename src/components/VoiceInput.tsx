@@ -1,202 +1,110 @@
-import { useEffect, useRef, useState } from 'react'
-import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
-import { validateAlternatives, validateCantonese } from '../utils/voiceValidation'
-import { getAudioContextClass, isSafari } from '../utils/browser'
+import { useState } from 'react'
+import { useVoiceAnswer } from '../hooks/useVoiceAnswer'
+import { validateCantonese } from '../utils/voiceValidation'
 import type { VoiceInputResult } from '../types/game'
 
 interface VoiceInputProps {
   expectedChant: string
   onResult: (result: VoiceInputResult) => void
   disabled?: boolean
+  /** Match strictly (no partial credit). Default false for practice. */
+  strict?: boolean
 }
 
-export default function VoiceInput({ expectedChant, onResult, disabled }: VoiceInputProps) {
-  const {
-    isSupported,
-    isListening,
-    interimText,
-    finalText,
-    alternatives,
-    error,
-    startListening,
-    stopListening,
-  } = useSpeechRecognition()
-
-  // Safari routes a single mic to SpeechRecognition; opening a second
-  // getUserMedia stream for the waveform starves the recognizer and breaks
-  // recognition. Skip the live waveform there and show a CSS pulse instead.
-  const safari = isSafari()
+/**
+ * Voice answer input backed by Groq Whisper (via useVoiceAnswer):
+ * tap the mic, speak one line, and on a silence the clip is transcribed and
+ * graded. Falls back to manual text entry where recording is unavailable.
+ */
+export default function VoiceInput({
+  expectedChant,
+  onResult,
+  disabled,
+  strict,
+}: VoiceInputProps) {
+  const { status, level, error, isSupported, start, stop } = useVoiceAnswer({
+    expectedChant,
+    onResult,
+    strict,
+  })
 
   const [manualMode, setManualMode] = useState(false)
   const [manualText, setManualText] = useState('')
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const animationRef = useRef<number>(0)
-  const analyserRef = useRef<AnalyserNode | null>(null)
-  const audioCtxRef = useRef<AudioContext | null>(null)
-  const streamRef = useRef<MediaStream | null>(null)
 
-  // Process final recognition result
-  useEffect(() => {
-    if (finalText && alternatives.length > 0) {
-      const result = validateAlternatives(alternatives, expectedChant)
-      onResult(result)
-    } else if (finalText) {
-      const result = validateCantonese(finalText, expectedChant)
-      onResult(result)
-    }
-  }, [finalText, alternatives, expectedChant, onResult])
-
-  // Waveform visualization (skipped on Safari — see `safari` note above)
-  useEffect(() => {
-    if (!isListening || safari) {
-      // Cleanup
-      if (animationRef.current) cancelAnimationFrame(animationRef.current)
-      streamRef.current?.getTracks().forEach((t) => t.stop())
-      audioCtxRef.current?.close().catch(() => {
-        /* ignore close errors */
-      })
-      audioCtxRef.current = null
-      analyserRef.current = null
-      return
-    }
-
-    let mounted = true
-    const AudioCtx = getAudioContextClass()
-    if (!AudioCtx) return
-
-    navigator.mediaDevices
-      .getUserMedia({ audio: true })
-      .then((stream) => {
-        if (!mounted) {
-          stream.getTracks().forEach((t) => t.stop())
-          return
-        }
-        streamRef.current = stream
-        const audioCtx = new AudioCtx()
-        audioCtxRef.current = audioCtx
-        const source = audioCtx.createMediaStreamSource(stream)
-        const analyser = audioCtx.createAnalyser()
-        analyser.fftSize = 256
-        source.connect(analyser)
-        analyserRef.current = analyser
-        drawWaveform()
-      })
-      .catch(() => {
-        // Mic permission denied — visualization unavailable
-      })
-
-    function drawWaveform() {
-      const canvas = canvasRef.current
-      const analyser = analyserRef.current
-      if (!canvas || !analyser) return
-
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return
-
-      const bufferLength = analyser.frequencyBinCount
-      const dataArray = new Uint8Array(bufferLength)
-      analyser.getByteFrequencyData(dataArray)
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-      const barWidth = canvas.width / bufferLength
-      for (let i = 0; i < bufferLength; i++) {
-        const value = dataArray[i] / 255
-        const barHeight = value * canvas.height
-        const hue = 200 + value * 100
-        ctx.fillStyle = `hsl(${hue}, 80%, 60%)`
-        ctx.fillRect(
-          i * barWidth,
-          canvas.height - barHeight,
-          barWidth - 1,
-          barHeight
-        )
-      }
-
-      animationRef.current = requestAnimationFrame(drawWaveform)
-    }
-
-    return () => {
-      mounted = false
-      if (animationRef.current) cancelAnimationFrame(animationRef.current)
-    }
-  }, [isListening, safari])
+  const active = status === 'listening' || status === 'speaking'
+  const analyzing = status === 'analyzing'
+  const showManual = manualMode || !isSupported
 
   const handleManualSubmit = () => {
     if (!manualText.trim()) return
-    const result = validateCantonese(manualText, expectedChant)
+    const result = validateCantonese(manualText, expectedChant, { strict: strict === true })
     onResult(result)
     setManualText('')
   }
 
-  // Fall back to manual mode if not supported
-  const showManual = manualMode || !isSupported
+  const statusLabel =
+    status === 'analyzing'
+      ? '分析緊…'
+      : status === 'speaking'
+        ? '錄緊音…'
+        : status === 'listening'
+          ? '聆聽中…'
+          : '按一下開始講'
+
+  // Bar heights track live mic level while speaking.
+  const bars = [0, 1, 2, 3, 4, 5, 6]
 
   return (
     <div className="flex flex-col items-center gap-3 w-full">
-      {/* Waveform (Chrome/Edge) — live mic visualization */}
-      {isListening && !safari && (
-        <canvas
-          ref={canvasRef}
-          width={300}
-          height={60}
-          className="rounded-lg bg-black/30 w-full max-w-xs"
-        />
-      )}
-
-      {/* Safari fallback — animated pulse bars (no 2nd mic stream) */}
-      {isListening && safari && (
-        <div className="flex items-end justify-center gap-1 h-[60px] w-full max-w-xs rounded-lg bg-black/30">
-          {[0, 1, 2, 3, 4, 5, 6].map((i) => (
-            <span
-              key={i}
-              className="w-2 rounded-full bg-blue-400"
-              style={{
-                height: '70%',
-                transformOrigin: 'bottom',
-                animation: `voicePulse 0.9s ease-in-out ${i * 0.1}s infinite`,
-              }}
-            />
-          ))}
+      {/* Live level meter while listening/speaking */}
+      {active && (
+        <div className="flex items-end justify-center gap-1 h-[60px] w-full max-w-xs rounded-lg bg-black/30 px-2">
+          {bars.map((i) => {
+            const phase = (i % 4) * 0.15
+            const h = Math.min(1, level * 6 + 0.12 + phase * (status === 'speaking' ? 1 : 0.2))
+            return (
+              <span
+                key={i}
+                className="w-2 rounded-full bg-blue-400 transition-[height] duration-100"
+                style={{ height: `${Math.round(h * 100)}%`, transformOrigin: 'bottom' }}
+              />
+            )
+          })}
         </div>
       )}
 
-      {/* Interim text display */}
-      {isListening && interimText && (
-        <p className="text-white/70 text-sm cantonese-text italic">
-          {interimText}...
-        </p>
+      {/* Analyzing spinner */}
+      {analyzing && (
+        <div className="flex items-center gap-2 text-white/80 text-sm cantonese-text">
+          <span className="inline-block w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+          分析緊…
+        </div>
       )}
 
       {/* Error message */}
       {error && (
         <p className="text-red-300 text-sm cantonese-text">
-          {error === 'no-speech'
-            ? '未能識別，請重試'
-            : error === 'not-allowed' || error === 'audio-capture'
+          {error === 'not-allowed'
             ? '需要麥克風權限'
-            : '語音識別出錯'}
+            : error === 'unsupported'
+              ? '此瀏覽器不支援錄音'
+              : '語音分析失敗，請再試'}
         </p>
       )}
 
       {!showManual ? (
         <>
-          {/* Voice button */}
           <button
-            onClick={isListening ? stopListening : startListening}
-            disabled={disabled}
-            className={`w-20 h-20 rounded-full flex items-center justify-center text-3xl shadow-lg transition-all active:scale-95 ${
-              isListening
-                ? 'bg-red-500 animate-pulse'
-                : 'bg-blue-600 hover:bg-blue-700'
+            onClick={active ? stop : start}
+            disabled={disabled || analyzing}
+            className={`w-20 h-20 rounded-full flex items-center justify-center text-3xl shadow-lg transition-all active:scale-95 disabled:opacity-50 ${
+              active ? 'bg-red-500 animate-pulse' : 'bg-blue-600 hover:bg-blue-700'
             }`}
-            aria-label={isListening ? '停止錄音' : '開始錄音'}
+            aria-label={active ? '停止錄音' : '開始錄音'}
           >
-            {isListening ? '⏹️' : '🎤'}
+            {active ? '⏹️' : '🎤'}
           </button>
-          <p className="text-white/80 text-sm cantonese-text">
-            {isListening ? '聆聽中...' : '按住錄音'}
-          </p>
+          <p className="text-white/80 text-sm cantonese-text">{statusLabel}</p>
 
           <button
             onClick={() => setManualMode(true)}
@@ -207,7 +115,6 @@ export default function VoiceInput({ expectedChant, onResult, disabled }: VoiceI
         </>
       ) : (
         <>
-          {/* Manual text input fallback */}
           <div className="flex gap-2 w-full max-w-xs">
             <input
               type="text"
@@ -236,7 +143,7 @@ export default function VoiceInput({ expectedChant, onResult, disabled }: VoiceI
           )}
           {!isSupported && (
             <p className="text-white/50 text-xs cantonese-text text-center">
-              此瀏覽器不支援語音輸入
+              此瀏覽器不支援錄音，請用文字輸入
             </p>
           )}
         </>

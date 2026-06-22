@@ -49,6 +49,30 @@ export function getSpeechRecognitionClass(): (new () => unknown) | undefined {
 }
 
 /**
+ * Best MediaRecorder audio mime type for this browser, with a matching file
+ * extension Groq Whisper can detect. Chrome/Edge produce webm/opus; Safari/iOS
+ * produce mp4/aac. Returns undefined if MediaRecorder is unavailable.
+ */
+export function pickAudioRecordingMime(): { mimeType: string; ext: string } | undefined {
+  if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined') {
+    return undefined
+  }
+  const candidates: Array<{ mimeType: string; ext: string }> = [
+    { mimeType: 'audio/webm;codecs=opus', ext: 'webm' },
+    { mimeType: 'audio/webm', ext: 'webm' },
+    { mimeType: 'audio/mp4', ext: 'mp4' },
+    { mimeType: 'audio/aac', ext: 'aac' },
+    { mimeType: 'audio/ogg;codecs=opus', ext: 'ogg' },
+  ]
+  for (const c of candidates) {
+    if (MediaRecorder.isTypeSupported(c.mimeType)) return c
+  }
+  // Some Safari builds support recording but report no type — let the browser
+  // pick its default and assume mp4.
+  return { mimeType: '', ext: 'mp4' }
+}
+
+/**
  * Ordered Cantonese recognition language tags to try.
  * Engines disagree on tags: Chrome/Edge accept `yue-Hant-HK`; Safari's
  * recognizer prefers `zh-HK`. We try the most specific first and fall back

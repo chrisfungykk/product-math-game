@@ -1,4 +1,4 @@
-import type { VoiceInputResult } from '../types/game'
+import type { ChantLine, VoiceInputResult } from '../types/game'
 import { toDigitSkeleton, toJyutpingSkeleton } from './cantoneseMatch'
 
 const CONFIDENCE_THRESHOLD = 75 // 75% minimum confidence to mark as correct
@@ -208,4 +208,76 @@ export function validateAlternatives(
   }
 
   return bestResult
+}
+
+// ── Blind mode scoring ──────────────────────────────────────────────────────
+
+export interface BlindLineResult {
+  expected: string // the chant line as it should be said
+  result: number // numeric product, for results display
+  isCorrect: boolean
+}
+
+export interface BlindRunScore {
+  perLine: BlindLineResult[]
+  correct: number
+  total: number
+}
+
+/**
+ * Find `needle` in `haystack` at or after `from`, exact first, then allowing a
+ * small edit distance and a ±1 length wobble. Returns the match position and
+ * length, or null. Used to locate each chant line's digit skeleton inside the
+ * full transcript skeleton.
+ */
+function fuzzyFindSkeleton(
+  haystack: string,
+  needle: string,
+  from: number
+): { index: number; length: number } | null {
+  if (!needle) return null
+
+  const exact = haystack.indexOf(needle, from)
+  if (exact !== -1) return { index: exact, length: needle.length }
+
+  const tol = Math.round(needle.length * 0.25)
+  if (tol < 1) return null
+
+  const lengths = [needle.length, needle.length - 1, needle.length + 1]
+  for (let i = from; i + needle.length - tol <= haystack.length; i++) {
+    for (const len of lengths) {
+      if (len <= 0 || i + len > haystack.length) continue
+      const window = haystack.slice(i, i + len)
+      if (levenshteinDistance(window, needle) <= tol) {
+        return { index: i, length: len }
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * Score a continuous "blind" recitation against an ordered list of chant lines.
+ *
+ * The whole transcript is reduced to a digit skeleton (robust to Chinese-vs-
+ * Arabic numerals and ASR homophones), then each expected line is located in
+ * order with a forward-advancing cursor. This tolerates imperfect VAD
+ * segmentation and a reciter who never pauses between lines.
+ */
+export function scoreBlindRun(transcript: string, lines: ChantLine[]): BlindRunScore {
+  const haystack = toDigitSkeleton(normalizeCantonese(transcript))
+  let cursor = 0
+
+  const perLine: BlindLineResult[] = lines.map((line) => {
+    const needle = toDigitSkeleton(normalizeCantonese(line.cantonese))
+    const found = fuzzyFindSkeleton(haystack, needle, cursor)
+    if (found) {
+      cursor = found.index + found.length
+      return { expected: line.cantonese, result: line.result, isCorrect: true }
+    }
+    return { expected: line.cantonese, result: line.result, isCorrect: false }
+  })
+
+  const correct = perLine.filter((p) => p.isCorrect).length
+  return { perLine, correct, total: lines.length }
 }

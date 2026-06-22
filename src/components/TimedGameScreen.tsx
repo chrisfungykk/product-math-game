@@ -1,11 +1,10 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import GameCanvas from './GameCanvas'
-import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
-import { validateAlternatives, validateCantonese } from '../utils/voiceValidation'
+import { useVoiceAnswer } from '../hooks/useVoiceAnswer'
+import { validateCantonese } from '../utils/voiceValidation'
 import { getChantsByTable } from '../utils/chantData'
 import { audioService } from '../services/AudioService'
-import { cantoneseLangCandidates, isSafari } from '../utils/browser'
 import type { TableNumber, VoiceInputResult } from '../types/game'
 import type { AmeliaAnimation } from './scene/AmeliaCharacter'
 
@@ -30,19 +29,6 @@ export default function TimedGameScreen() {
   const location = useLocation()
   const startTable = (location.state?.startTable as TableNumber) ?? 9
 
-  const {
-    isSupported,
-    isListening,
-    interimText,
-    finalText,
-    alternatives,
-    error,
-    startListening,
-    stopListening,
-    resetTranscript,
-  } = useSpeechRecognition(cantoneseLangCandidates(), true)
-
-  const safari = isSafari()
   const lines = getChantsByTable(startTable)
   const totalLines = lines.length
 
@@ -68,7 +54,6 @@ export default function TimedGameScreen() {
   const spokenHistoryRef = useRef<string[]>([])
 
   const currentLine = lines[currentLineIndex]
-  const showManual = manualMode || !isSupported
 
   const clearTransitionTimer = () => {
     if (transitionTimerRef.current) {
@@ -88,7 +73,7 @@ export default function TimedGameScreen() {
 
       doneRef.current = true
       processingRef.current = true
-      stopListening()
+      voiceStopRef.current()
       clearTransitionTimer()
       if (intervalRef.current) clearInterval(intervalRef.current)
 
@@ -138,7 +123,7 @@ export default function TimedGameScreen() {
         })
       }, 1800)
     },
-    [navigate, startTable, stopListening, totalLines]
+    [navigate, startTable, totalLines]
   )
 
   const scheduleRetry = useCallback(
@@ -146,8 +131,7 @@ export default function TimedGameScreen() {
       if (doneRef.current) return
 
       processingRef.current = true
-      stopListening()
-      resetTranscript()
+      voiceStopRef.current()
       clearTransitionTimer()
 
       missesRef.current += 1
@@ -157,18 +141,17 @@ export default function TimedGameScreen() {
       audioService.playEffect('incorrect')
 
       transitionTimerRef.current = setTimeout(() => {
-        resetTranscript()
         resetLineClock()
         setFeedback(null)
         setAnimation('idle')
         processingRef.current = false
 
-        if (!showManual) {
-          startListening()
+        if (!showManualRef.current) {
+          voiceStartRef.current()
         }
       }, RETRY_DELAY_MS)
     },
-    [resetLineClock, resetTranscript, showManual, startListening, stopListening]
+    [resetLineClock]
   )
 
   const handleLineCorrect = useCallback(
@@ -176,8 +159,7 @@ export default function TimedGameScreen() {
       if (processingRef.current || doneRef.current) return
 
       processingRef.current = true
-      stopListening()
-      resetTranscript()
+      voiceStopRef.current()
       clearTransitionTimer()
 
       const nextResults = [...correctResultsRef.current, result]
@@ -197,34 +179,54 @@ export default function TimedGameScreen() {
 
       transitionTimerRef.current = setTimeout(() => {
         setCurrentLineIndex((index) => index + 1)
-        resetTranscript()
         resetLineClock()
         setManualText('')
         setFeedback(null)
         setAnimation('idle')
         processingRef.current = false
 
-        if (!showManual) {
-          startListening()
+        if (!showManualRef.current) {
+          voiceStartRef.current()
         }
       }, AUTO_ADVANCE_DELAY_MS)
     },
-    [
-      currentLineIndex,
-      finishRun,
-      resetLineClock,
-      resetTranscript,
-      showManual,
-      startListening,
-      stopListening,
-      totalLines,
-    ]
+    [currentLineIndex, finishRun, resetLineClock, totalLines]
   )
 
+  const handleResult = useCallback(
+    (result: VoiceInputResult) => {
+      if (processingRef.current || doneRef.current || phaseRef.current !== 'counting') return
+      if (result.isCorrect) {
+        handleLineCorrect(result)
+      } else {
+        scheduleRetry(result.feedback || '再試一次')
+      }
+    },
+    [handleLineCorrect, scheduleRetry]
+  )
+
+  const voice = useVoiceAnswer({
+    expectedChant: currentLine?.cantonese ?? '',
+    onResult: handleResult,
+    strict: true,
+  })
+
+  // Stable refs to voice controls + derived flags for use inside timers.
+  const voiceStartRef = useRef(voice.start)
+  const voiceStopRef = useRef(voice.stop)
+  voiceStartRef.current = voice.start
+  voiceStopRef.current = voice.stop
+  const phaseRef = useRef(phase)
+  phaseRef.current = phase
+  const showManual = manualMode || !voice.isSupported
+  const showManualRef = useRef(showManual)
+  showManualRef.current = showManual
+
   const handleLineTimeout = useCallback(() => {
-    if (phase !== 'counting' || processingRef.current || doneRef.current) return
+    if (phaseRef.current !== 'counting' || processingRef.current || doneRef.current) return
+    if (voice.status === 'analyzing') return // a result is in flight
     scheduleRetry('時間到，再試一次')
-  }, [phase, scheduleRetry])
+  }, [scheduleRetry, voice.status])
 
   useEffect(() => {
     if (phase !== 'counting') return
@@ -247,39 +249,12 @@ export default function TimedGameScreen() {
   }, [handleLineTimeout, phase])
 
   useEffect(() => {
-    if (phase !== 'counting' || processingRef.current || !currentLine || showManual) {
-      return
-    }
-
-    const candidates = [...alternatives]
-    if (finalText) candidates.push({ transcript: finalText, confidence: 1 })
-    if (interimText) candidates.push({ transcript: interimText, confidence: 0 })
-    if (candidates.length === 0) return
-
-    const result = validateAlternatives(candidates, currentLine.cantonese, {
-      strict: true,
-    })
-
-    if (result.isCorrect) {
-      handleLineCorrect(result)
-    }
-  }, [
-    alternatives,
-    currentLine,
-    finalText,
-    handleLineCorrect,
-    interimText,
-    phase,
-    showManual,
-  ])
-
-  useEffect(() => {
     return () => {
-      stopListening()
+      voiceStopRef.current()
       if (intervalRef.current) clearInterval(intervalRef.current)
       clearTransitionTimer()
     }
-  }, [stopListening])
+  }, [])
 
   const handleStart = () => {
     audioService.unlock()
@@ -297,13 +272,13 @@ export default function TimedGameScreen() {
     setManualText('')
     setTimedResult(null)
     setAnimation('idle')
-    resetTranscript()
     startedAtRef.current = Date.now()
     resetLineClock()
     setPhase('counting')
+    phaseRef.current = 'counting'
 
     if (!showManual) {
-      startListening()
+      voice.start()
     }
   }
 
@@ -325,22 +300,19 @@ export default function TimedGameScreen() {
   }
 
   const handleUseManual = () => {
-    stopListening()
-    resetTranscript()
+    voice.stop()
     setManualMode(true)
   }
 
   const handleUseVoice = () => {
     setManualMode(false)
-    resetTranscript()
-
     if (phase === 'counting' && !processingRef.current) {
-      startListening()
+      voice.start()
     }
   }
 
   const handleExit = () => {
-    stopListening()
+    voice.stop()
     audioService.stopSpeaking()
     navigate('/')
   }
@@ -352,6 +324,8 @@ export default function TimedGameScreen() {
       : barFraction > 0.25
         ? 'bg-yellow-400'
         : 'bg-red-500'
+
+  const active = voice.status === 'listening' || voice.status === 'speaking'
 
   if (!currentLine) {
     return (
@@ -387,7 +361,7 @@ export default function TimedGameScreen() {
             </div>
           }
         >
-          <GameCanvas animation={animation} audioLevel={0} />
+          <GameCanvas animation={animation} audioLevel={active ? voice.level : 0} />
         </Suspense>
       </div>
 
@@ -446,9 +420,7 @@ export default function TimedGameScreen() {
           </div>
 
           <div className="text-center">
-            <p className="text-white/70 text-sm cantonese-text mb-1">
-              目前口訣
-            </p>
+            <p className="text-white/70 text-sm cantonese-text mb-1">目前口訣</p>
             <p className="text-white text-4xl font-bold cantonese-text tracking-wider drop-shadow-lg">
               {currentLine.cantonese}
             </p>
@@ -468,35 +440,35 @@ export default function TimedGameScreen() {
             </div>
           )}
 
-          {isListening && interimText && (
-            <p className="text-white/70 text-sm cantonese-text italic text-center">
-              {interimText}...
-            </p>
-          )}
-
-          {isListening && safari && (
-            <div className="flex items-end justify-center gap-1 h-[40px] w-full max-w-xs rounded-lg bg-black/30">
-              {[0, 1, 2, 3, 4, 5, 6].map((i) => (
-                <span
-                  key={i}
-                  className="w-2 rounded-full bg-blue-400"
-                  style={{
-                    height: '70%',
-                    transformOrigin: 'bottom',
-                    animation: `voicePulse 0.9s ease-in-out ${i * 0.1}s infinite`,
-                  }}
-                />
-              ))}
+          {voice.status === 'analyzing' && (
+            <div className="flex items-center gap-2 text-white/80 text-sm cantonese-text">
+              <span className="inline-block w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+              分析緊…
             </div>
           )}
 
-          {error && (
+          {active && (
+            <div className="flex items-end justify-center gap-1 h-[40px] w-full max-w-xs rounded-lg bg-black/30 px-2">
+              {[0, 1, 2, 3, 4, 5, 6].map((i) => {
+                const h = Math.min(1, voice.level * 6 + 0.12)
+                return (
+                  <span
+                    key={i}
+                    className="w-2 rounded-full bg-blue-400 transition-[height] duration-100"
+                    style={{ height: `${Math.round(h * 100)}%`, transformOrigin: 'bottom' }}
+                  />
+                )
+              })}
+            </div>
+          )}
+
+          {voice.error && (
             <p className="text-red-300 text-sm cantonese-text">
-              {error === 'no-speech'
-                ? '未能識別，請重試'
-                : error === 'not-allowed' || error === 'audio-capture'
-                  ? '需要麥克風權限'
-                  : '語音識別出錯'}
+              {voice.error === 'not-allowed'
+                ? '需要麥克風權限'
+                : voice.error === 'unsupported'
+                  ? '此瀏覽器不支援錄音'
+                  : '語音分析失敗，請再試'}
             </p>
           )}
 
@@ -512,17 +484,18 @@ export default function TimedGameScreen() {
                 </button>
               ) : (
                 <button
-                  onClick={isListening ? stopListening : startListening}
-                  className={`w-24 h-24 rounded-full flex items-center justify-center text-4xl shadow-lg active:scale-95 transition-all ${
-                    isListening ? 'bg-red-500 animate-pulse' : 'bg-blue-600'
+                  onClick={active ? voice.stop : voice.start}
+                  disabled={voice.status === 'analyzing'}
+                  className={`w-24 h-24 rounded-full flex items-center justify-center text-4xl shadow-lg active:scale-95 transition-all disabled:opacity-50 ${
+                    active ? 'bg-red-500 animate-pulse' : 'bg-blue-600'
                   }`}
-                  aria-label={isListening ? '停止錄音' : '開始錄音'}
+                  aria-label={active ? '停止錄音' : '開始錄音'}
                 >
-                  {isListening ? '⏹️' : '🎤'}
+                  {active ? '⏹️' : '🎤'}
                 </button>
               )}
               <p className="text-white/80 text-sm cantonese-text">
-                {phase === 'ready' ? '點擊開始挑戰' : '收音中，答啱會自動下一句'}
+                {phase === 'ready' ? '點擊開始挑戰' : '講出口訣，答啱會自動下一句'}
               </p>
               <button
                 onClick={handleUseManual}
@@ -558,7 +531,7 @@ export default function TimedGameScreen() {
                     提交
                   </button>
                 )}
-                {isSupported && (
+                {voice.isSupported && (
                   <button
                     onClick={handleUseVoice}
                     className="bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-3 px-4 rounded-lg cantonese-text text-base transition-all active:scale-95"
@@ -567,9 +540,9 @@ export default function TimedGameScreen() {
                   </button>
                 )}
               </div>
-              {!isSupported && (
+              {!voice.isSupported && (
                 <p className="text-white/50 text-xs cantonese-text text-center">
-                  此瀏覽器不支援語音輸入
+                  此瀏覽器不支援錄音
                 </p>
               )}
             </div>

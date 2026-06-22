@@ -1,5 +1,6 @@
 export type TableNumber = 9 | 8 | 7 | 6 | 5 | 4 | 3 | 2 | 1;
 export type GamePhase = 'idle' | 'playing' | 'reviewing' | 'complete';
+export type GameMode = 'practice' | 'timed' | 'blind';
 
 export interface VoiceInputResult {
   spokenText: string;

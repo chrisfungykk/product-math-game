@@ -1,110 +1,109 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import type { TableNumber } from '../types/game'
+import type { GameMode, TableNumber } from '../types/game'
 import { audioService } from '../services/AudioService'
+import ScreenShell from './ui/ScreenShell'
+import ModeCard from './ui/ModeCard'
+import TablePicker from './ui/TablePicker'
+import Button from './ui/Button'
 import Footer from './Footer'
 
-type GameMode = 'practice' | 'timed'
+interface ModeDef {
+  id: GameMode
+  emoji: string
+  title: string
+  desc: string
+  route: string
+  accent: 'practice' | 'timed' | 'blind'
+  cta: string
+}
+
+const MODES: ModeDef[] = [
+  {
+    id: 'practice',
+    emoji: '📖',
+    title: '練習',
+    desc: '跟住 Amelia 慢慢學，答啱先過下一句',
+    route: '/game',
+    accent: 'practice',
+    cta: '開始練習',
+  },
+  {
+    id: 'timed',
+    emoji: '⏱️',
+    title: '限時挑戰',
+    desc: '每句 20 秒，睇吓你有幾快',
+    route: '/timed',
+    accent: 'timed',
+    cta: '開始挑戰',
+  },
+  {
+    id: 'blind',
+    emoji: '🧠',
+    title: '盲背',
+    desc: '冚住口訣一口氣背曬，最後睇準確度同時間',
+    route: '/blind',
+    accent: 'blind',
+    cta: '開始盲背',
+  },
+]
 
 export default function HomeScreen() {
   const [selectedTable, setSelectedTable] = useState<TableNumber>(9)
   const [mode, setMode] = useState<GameMode>('practice')
   const navigate = useNavigate()
 
-  const handleStart = () => {
-    // Unlock audio on user gesture (required for iOS Safari)
-    audioService.unlock()
-    const path = mode === 'timed' ? '/timed' : '/game'
-    navigate(path, { state: { startTable: selectedTable } })
-  }
+  const activeMode = MODES.find((m) => m.id === mode) ?? MODES[0]
 
-  const tables: TableNumber[] = [9, 8, 7, 6, 5, 4, 3, 2, 1]
+  const handleStart = () => {
+    // Unlock audio on user gesture (required for iOS Safari).
+    audioService.unlock()
+    navigate(activeMode.route, { state: { startTable: selectedTable } })
+  }
 
   return (
     <>
-      <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-purple-500 via-pink-500 to-red-500 px-4 safe-area-top safe-area-bottom">
-        <div className="text-center mb-12">
-          <h1 className="text-5xl font-bold text-white mb-2 cantonese-text">背口決</h1>
-          <p className="text-2xl text-white/90 cantonese-text">九因歌遊戲</p>
-          <p className="text-lg text-white/70 mt-2 cantonese-text">學習廣東乘法表</p>
+      <ScreenShell gradient="home">
+        <div className="text-center mb-8 animate-fadeUp">
+          <h1 className="text-5xl font-bold text-white mb-2 cantonese-text drop-shadow">
+            背口訣
+          </h1>
+          <p className="text-xl text-white/90 cantonese-text">九因歌遊戲</p>
+          <p className="text-sm text-white/70 mt-1 cantonese-text">用聲音學廣東乘數表</p>
         </div>
 
-        <div className="bg-white rounded-lg shadow-2xl p-8 w-full max-w-sm">
-          {/* Mode toggle */}
+        <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm animate-pop">
+          {/* Mode selection */}
+          <p className="text-gray-700 font-semibold mb-3 cantonese-text">揀選模式</p>
+          <div className="flex flex-col gap-2 mb-6">
+            {MODES.map((m) => (
+              <ModeCard
+                key={m.id}
+                emoji={m.emoji}
+                title={m.title}
+                desc={m.desc}
+                selected={mode === m.id}
+                accent={m.accent}
+                onClick={() => setMode(m.id)}
+              />
+            ))}
+          </div>
+
+          {/* Table selection */}
+          <p className="text-gray-700 font-semibold mb-3 cantonese-text">揀選乘數表</p>
           <div className="mb-6">
-            <div className="flex rounded-lg bg-gray-200 p-1">
-              <button
-                onClick={() => setMode('practice')}
-                className={`flex-1 py-2 rounded-md font-semibold cantonese-text text-sm transition-all ${
-                  mode === 'practice'
-                    ? 'bg-white text-blue-600 shadow'
-                    : 'text-gray-600'
-                }`}
-              >
-                練習
-              </button>
-              <button
-                onClick={() => setMode('timed')}
-                className={`flex-1 py-2 rounded-md font-semibold cantonese-text text-sm transition-all ${
-                  mode === 'timed'
-                    ? 'bg-white text-red-500 shadow'
-                    : 'text-gray-600'
-                }`}
-              >
-                限時
-              </button>
-            </div>
+            <TablePicker
+              value={selectedTable}
+              onChange={setSelectedTable}
+              accent={activeMode.accent}
+            />
           </div>
 
-          <div className="mb-8">
-            <p className="text-center text-gray-700 font-semibold mb-4 cantonese-text text-lg">
-              揀選乘數表
-            </p>
-            <div className="grid grid-cols-3 gap-3">
-              {tables.map((table) => (
-                <button
-                  key={table}
-                  onClick={() => setSelectedTable(table)}
-                  className={`py-3 px-2 rounded-lg font-bold text-xl cantonese-text transition-all transform hover:scale-105 ${
-                    selectedTable === table
-                      ? mode === 'timed'
-                        ? 'bg-red-500 text-white shadow-lg scale-105'
-                        : 'bg-blue-600 text-white shadow-lg scale-105'
-                      : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
-                  }`}
-                >
-                  {table}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <button
-            onClick={handleStart}
-            className={`w-full text-white font-bold py-4 px-6 rounded-lg cantonese-text text-lg transition-all active:scale-95 shadow-lg ${
-              mode === 'timed'
-                ? 'bg-red-500 hover:bg-red-600'
-                : 'bg-blue-600 hover:bg-blue-700'
-            }`}
-          >
-            {mode === 'timed' ? '開始挑戰' : '開始遊戲'}
-          </button>
-
-          <div className="mt-6 text-sm text-gray-600 text-center cantonese-text">
-            {mode === 'timed' ? (
-              <>
-                <p>每句 20 秒，答啱自動下一句</p>
-                <p>時間到會留低俾你再試！</p>
-              </>
-            ) : (
-              <>
-                <p>跟著 Amelia 學習乘法表</p>
-                <p>用聲音回答問題</p>
-              </>
-            )}
-          </div>
+          <Button variant={activeMode.accent} onClick={handleStart}>
+            {activeMode.cta}（{selectedTable} 因歌）
+          </Button>
         </div>
-      </div>
+      </ScreenShell>
 
       <Footer />
     </>
